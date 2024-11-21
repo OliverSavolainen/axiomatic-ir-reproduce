@@ -1,4 +1,8 @@
 import torch
+import matplotlib.pyplot as plt
+import seaborn as sns
+from tqdm import tqdm
+
 
 from transformers import AutoTokenizer, AutoModel
 import TransformerLens.transformer_lens.utils as utils
@@ -115,9 +119,46 @@ def main():
         ranking_metric,
         layer_head_list
     )
-    print(act_patch_attn_head_out_by_pos)
+    print("Results from get_act_patch_block_every:\n", act_patch_block_every)
+    print("Results from get_act_patch_attn_head_out_all_pos:\n", act_patch_attn_head_out_all_pos)
+    print("Results from get_act_patch_attn_head_out_by_pos:\n", act_patch_attn_head_out_by_pos)
 
-    return
+    # Visualizing the results with heatmaps
+    def plot_heatmap(data, title, xlabel, ylabel):
+        plt.figure(figsize=(10, 6))
+        sns.heatmap(data, annot=True, fmt=".2f", cmap="coolwarm", cbar=True)
+        plt.title(title)
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.show()
+
+    # Plot the heatmap for get_act_patch_block_every (3D tensor: [component, layer, position])
+    components = ["resid_pre", "attn_out", "mlp_out"]
+    for i, component in enumerate(components):
+        plot_heatmap(
+            act_patch_block_every[i].cpu().numpy(),
+            title=f"Importance of {component} (Layer x Position)",
+            xlabel="Position",
+            ylabel="Layer"
+        )
+
+    # Plot the heatmap for get_act_patch_attn_head_out_all_pos (2D tensor: [layer, head])
+    plot_heatmap(
+        act_patch_attn_head_out_all_pos.cpu().numpy(),
+        title="Importance of Attention Heads (Layer x Head)",
+        xlabel="Head",
+        ylabel="Layer"
+    )
+
+    # Plot the heatmap for get_act_patch_attn_head_out_by_pos (3D tensor: [component, layer-head index, position])
+    components_by_pos = ["attn_head_out", "pattern"]
+    for i, component in enumerate(components_by_pos):
+        plot_heatmap(
+            act_patch_attn_head_out_by_pos[i].cpu().numpy(),
+            title=f"Importance of {component} by Position (Layer-Head x Position)",
+            xlabel="Position",
+            ylabel="Layer-Head"
+        )
 
 if __name__ == "__main__":
     main()
