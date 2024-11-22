@@ -2,7 +2,6 @@ from beir import util
 from beir.datasets.data_loader import GenericDataLoader
 import pathlib
 import torch
-import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
 from transformers import AutoTokenizer, AutoModel
@@ -93,6 +92,10 @@ def prepare_diagnostic_dataset(corpus, queries, qrels, device):
     Prepare the diagnostic dataset by ranking queries based on score changes.
     """
     diagnostic_dataset = []
+
+    pre_trained_model_name = "sebastian-hofstaetter/distilbert-dot-tas_b-b256-msmarco"
+    tokenizer, tl_model = load_tokenizer_and_models(pre_trained_model_name, device)
+
     for query_id, query_text in queries.items():
         relevant_doc_ids = qrels.get(query_id, {})
         query_docs = [corpus[doc_id] for doc_id in relevant_doc_ids.keys() if doc_id in corpus]
@@ -101,8 +104,6 @@ def prepare_diagnostic_dataset(corpus, queries, qrels, device):
             print(f"No relevant documents found for query {query_id}.")
             continue
 
-        pre_trained_model_name = "sebastian-hofstaetter/distilbert-dot-tas_b-b256-msmarco"
-        tokenizer, tl_model = load_tokenizer_and_models(pre_trained_model_name, device)
         total_score_change = 0
         num_docs = 0
         scored_docs = []
@@ -338,7 +339,6 @@ def main():
     4. Compute the average score change for all documents per query.
     5. Select the top 100 queries with the highest average score change.
     """
-    logging.getLogger("transformer_lens").setLevel(logging.ERROR)
 
     torch.set_grad_enabled(False)
     device = get_device()
