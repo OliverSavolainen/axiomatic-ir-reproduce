@@ -5,6 +5,7 @@ import seaborn as sns
 from transformers import AutoTokenizer, AutoModel
 from TransformerLens.transformer_lens import HookedEncoder
 from TransformerLens.transformer_lens.utils import get_device
+import random
 
 from patching_helpers import (
     get_act_patch_block_every,
@@ -139,7 +140,10 @@ def main():
             continue
 
         original_doc = query_docs[0].body
-        perturbed_doc = original_doc + " additional relevance information"
+
+        # Randomly select a query term for perturbation
+        random_query_term = random.choice(query.text.split())
+        perturbed_doc = original_doc + f"{random_query_term}"
 
         print(f"Original Document: {original_doc[:200]}...")  # Truncate for readability
 
