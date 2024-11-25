@@ -118,7 +118,7 @@ def prepare_diagnostic_dataset(corpus, queries, qrels, device):
         total_score_change = 0
         num_docs = 0
         scored_docs = []
-
+        score_changes = []
         for doc in query_docs:
             original_doc = doc["text"]
             max_seq_length = 512
@@ -131,7 +131,6 @@ def prepare_diagnostic_dataset(corpus, queries, qrels, device):
                 return_type="embeddings",
                 one_zero_attention_mask=tokenized_query["attention_mask"].to(device),
             )
-            global q_embedding
             q_embedding = q_outputs[:, 0, :].squeeze(0)
 
             doc_outputs = tl_model(
@@ -168,14 +167,19 @@ def prepare_diagnostic_dataset(corpus, queries, qrels, device):
             # Compute score change
             score_change = perturbed_score - baseline_score
             total_score_change += score_change
+            score_changes.append(score_change)
             num_docs += 1
 
         if num_docs > 0:
-            avg_score_change = total_score_change / num_docs
+            max_change = max(score_changes)
+            min_change = min(score_changes)
+            normalized_changes = [(sc - min_change) / (max_change - min_change) if max_change != min_change else 0 for sc in score_changes]
+
+            avg_normalized_score_change = sum(normalized_changes) / len(normalized_changes)
             diagnostic_dataset.append({
                 "query_id": query_id,
                 "query_text": query_text,
-                "avg_score_change": avg_score_change,
+                "avg_score_change": avg_normalized_score_change,
             })
 
     # Select top 100 queries with the highest average score change
@@ -255,6 +259,14 @@ def perform_activation_patching(diagnostic_dataset, corpus, queries, qrels, devi
                 tokenized_injected_doc["attention_mask"] = torch.cat(
                     [tokenized_injected_doc["attention_mask"].to(device), filler_attn_mask], dim=1
                 )
+
+        tokenized_query = tokenizer(query_text, return_tensors="pt", max_length=max_seq_length, truncation=True)
+        q_outputs = tl_model(
+            tokenized_query["input_ids"].to(device),
+            return_type="embeddings",
+            one_zero_attention_mask=tokenized_query["attention_mask"].to(device),
+        )
+        q_embedding = q_outputs[:, 0, :].squeeze(0)
 
         # Baseline run
         baseline_outputs, baseline_cache = tl_model.run_with_cache(
