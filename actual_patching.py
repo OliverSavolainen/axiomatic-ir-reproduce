@@ -294,6 +294,7 @@ def perform_activation_patching(diagnostic_dataset, corpus, queries, qrels, devi
                 patched_doc_embedding,
                 baseline_score,
                 perturbed_score,
+                q_embedding
             ),
         )
 
@@ -306,6 +307,7 @@ def perform_activation_patching(diagnostic_dataset, corpus, queries, qrels, devi
                 patched_doc_embedding,
                 baseline_score,
                 perturbed_score,
+                q_embedding
             ),
         )
 
@@ -320,6 +322,7 @@ def perform_activation_patching(diagnostic_dataset, corpus, queries, qrels, devi
                 patched_doc_embedding,
                 baseline_score,
                 perturbed_score,
+                q_embedding
             ),
             layer_head_list,
         )
@@ -420,7 +423,7 @@ def classify_tokens(tokenizer, query, baseline_doc, perturbed_doc):
     return token_types
 
 
-def ranking_metric(patched_doc_embedding, og_score, p_score):
+def ranking_metric(patched_doc_embedding, og_score, p_score, q_embedding):
     """
     Computes the ranking metric normalized between -1 and 1.
     """
