@@ -1,3 +1,5 @@
+import json
+import os
 from beir import util
 from beir.datasets.data_loader import GenericDataLoader
 import pathlib
@@ -16,11 +18,12 @@ from patching_helpers import (
     get_act_patch_attn_head_by_pos,
 )
 
-def plot_heatmap(data, title, xlabel, ylabel, xticklabels=None, yticklabels=None, figsize=(8, 6), cmap="coolwarm"):
+def plot_heatmap(data, title, xlabel, ylabel, xticklabels=None, yticklabels=None, figsize=(8, 6), cmap="coolwarm_r", save_path=None):
     """
     Utility function to plot paper-style heatmaps using seaborn.
     """
     plt.figure(figsize=figsize)
+    sns.set_theme(style="whitegrid")  # Set theme for a cleaner look
     sns.set(font_scale=1.2)
     sns.heatmap(
         data,
@@ -38,8 +41,16 @@ def plot_heatmap(data, title, xlabel, ylabel, xticklabels=None, yticklabels=None
     plt.title(title, fontsize=16)
     plt.xlabel(xlabel, fontsize=14)
     plt.ylabel(ylabel, fontsize=14)
+    plt.xticks(rotation=0)
     plt.tight_layout()
-    plt.show()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300)  # Save the plot to the specified path
+        print(f"Heatmap saved to {save_path}")
+    else:
+        plt.show()
+
+    plt.close()
 
 def load_tokenizer_and_models(hf_model_name, device):
     """
@@ -120,6 +131,7 @@ def prepare_diagnostic_dataset(corpus, queries, qrels, device):
                 return_type="embeddings",
                 one_zero_attention_mask=tokenized_query["attention_mask"].to(device),
             )
+            global q_embedding
             q_embedding = q_outputs[:, 0, :].squeeze(0)
 
             doc_outputs = tl_model(
@@ -176,13 +188,27 @@ def prepare_diagnostic_dataset(corpus, queries, qrels, device):
 
 def perform_activation_patching(diagnostic_dataset, corpus, queries, qrels, device):
     """
-    Perform activation patching and generate heatmaps for each query in the diagnostic dataset.
+    Perform activation patching and generate averaged heatmaps for the diagnostic dataset.
     """
     pre_trained_model_name = "sebastian-hofstaetter/distilbert-dot-tas_b-b256-msmarco"
     tokenizer, tl_model = load_tokenizer_and_models(pre_trained_model_name, device)
     max_seq_length = 512
 
     os.makedirs("heatmaps", exist_ok=True)
+
+    # Initialize aggregated data structures
+    n_layers = tl_model.cfg.n_layers
+    n_heads = tl_model.cfg.n_heads
+    n_token_types = 6  # Number of unique token types
+
+    # Initialize aggregated data structures
+    aggregated_data = {
+        "Block Every": torch.zeros((n_token_types, n_layers), device=device),
+        "Attn Head All Pos": torch.zeros((n_layers, n_heads), device=device),
+        "Attn Head By Pos": torch.zeros((n_token_types, n_layers), device=device),  # Adjust dynamically
+    }
+
+    query_count = 0
 
     for data in diagnostic_dataset:
         query_id = data["query_id"]
@@ -204,6 +230,32 @@ def perform_activation_patching(diagnostic_dataset, corpus, queries, qrels, devi
         tokenized_baseline_doc = tokenizer(original_doc, return_tensors="pt", max_length=max_seq_length, truncation=True)
         tokenized_injected_doc = tokenizer(injected_doc, return_tensors="pt", max_length=max_seq_length, truncation=True)
 
+        # Ensure token lengths match
+        b_len = tokenized_baseline_doc["input_ids"].size(1)
+        p_len = tokenized_injected_doc["input_ids"].size(1)
+
+        if b_len != p_len:
+            size_diff = abs(b_len - p_len)
+            filler_token = tokenizer.encode("a", add_special_tokens=False)[0]
+            if b_len < p_len:
+                filler_tokens = torch.full((1, size_diff), filler_token, dtype=torch.long, device=device)
+                filler_attn_mask = torch.ones((1, size_diff), dtype=torch.long, device=device)
+                tokenized_baseline_doc["input_ids"] = torch.cat(
+                    [tokenized_baseline_doc["input_ids"].to(device), filler_tokens], dim=1
+                )
+                tokenized_baseline_doc["attention_mask"] = torch.cat(
+                    [tokenized_baseline_doc["attention_mask"].to(device), filler_attn_mask], dim=1
+                )
+            else:
+                filler_tokens = torch.full((1, size_diff), filler_token, dtype=torch.long, device=device)
+                filler_attn_mask = torch.ones((1, size_diff), dtype=torch.long, device=device)
+                tokenized_injected_doc["input_ids"] = torch.cat(
+                    [tokenized_injected_doc["input_ids"].to(device), filler_tokens], dim=1
+                )
+                tokenized_injected_doc["attention_mask"] = torch.cat(
+                    [tokenized_injected_doc["attention_mask"].to(device), filler_attn_mask], dim=1
+                )
+
         # Baseline run
         baseline_outputs, baseline_cache = tl_model.run_with_cache(
             tokenized_baseline_doc["input_ids"].to(device),
@@ -221,8 +273,6 @@ def perform_activation_patching(diagnostic_dataset, corpus, queries, qrels, devi
         perturbed_score = torch.matmul(q_embedding, perturbed_outputs[:, 0, :].t()).item()
 
         # Patching methods
-
-        # Patches across all layers and components (broad view)
         act_patch_block_every = get_act_patch_block_every(
             tl_model,
             device,
@@ -235,7 +285,6 @@ def perform_activation_patching(diagnostic_dataset, corpus, queries, qrels, devi
             ),
         )
 
-        # Patches all attention head outputs (head-specific analysis)
         act_patch_attn_head_out_all_pos = get_act_patch_attn_head_out_all_pos(
             tl_model,
             device,
@@ -248,7 +297,8 @@ def perform_activation_patching(diagnostic_dataset, corpus, queries, qrels, devi
             ),
         )
 
-        # Patches attention head outputs for specific token positions (fine-grained analysis)
+        layer_head_list = [(layer, head) for layer in range(tl_model.cfg.n_layers) for head in range(tl_model.cfg.n_heads)]
+
         act_patch_attn_head_by_pos = get_act_patch_attn_head_by_pos(
             tl_model,
             device,
@@ -259,42 +309,75 @@ def perform_activation_patching(diagnostic_dataset, corpus, queries, qrels, devi
                 baseline_score,
                 perturbed_score,
             ),
+            layer_head_list,
         )
 
-        # Generate heatmaps for each method
+        # Classify tokens
+        token_types = classify_tokens(tokenizer, query_text, original_doc, injected_doc)
+        unique_token_types = ["tokCLS", "tokinj", "tokqterm+", "tokqterm-", "tokother", "tokSEP"]
+        token_type_indices = {t: i for i, t in enumerate(unique_token_types)}
+
+        print(f"Token types: {token_types}")  # Print classified token types
+        print(f"Unique token types: {unique_token_types}")
+
         for patch_type, patch_data in [
             ("Block Every", act_patch_block_every),
             ("Attn Head All Pos", act_patch_attn_head_out_all_pos),
             ("Attn Head By Pos", act_patch_attn_head_by_pos),
         ]:
-            # Classify tokens and group activations
-            token_types = classify_tokens(tokenizer, query_text, original_doc, injected_doc)
-            unique_token_types = ["tokCLS", "tokinj", "tokqterm+", "tokqterm-", "tokother", "tokSEP"]
-            token_type_indices = {t: i for i, t in enumerate(unique_token_types)}
+            print(f"\nProcessing patch type: {patch_type}")
+            print(f"Patch data shape: {patch_data.shape}")
 
-            grouped_data = torch.zeros((len(unique_token_types), patch_data.shape[1]), device=device)
-            for pos, token_type_idx in enumerate([token_type_indices[token] for token in token_types]):
-                grouped_data[token_type_idx, :] += patch_data[:, :, pos].mean(dim=0)
+            if patch_type == "Block Every":
+                grouped_data = torch.zeros((n_token_types, n_layers), device=device)
+                for component_idx in range(3):  # 3 components: resid_pre, attn_out, mlp_out
+                    for pos, token_type_idx in enumerate([token_type_indices[token] for token in token_types]):
+                        grouped_data[token_type_idx, :] += patch_data[component_idx, :, pos]
+                aggregated_data[patch_type] += grouped_data
 
-            # Generate heatmaps for components
+            elif patch_type == "Attn Head All Pos":
+                grouped_data = patch_data.mean(dim=1)  # Average over heads
+                aggregated_data[patch_type] += grouped_data.unsqueeze(1)  # Reshape to (n_layers, 1)
+
+            elif patch_type == "Attn Head By Pos":
+                grouped_data = torch.zeros((n_token_types, n_layers), device=device)
+                for component_idx in range(2):  # 2 components: z and pattern
+                    for i, (layer, head) in enumerate(layer_head_list):
+                        for pos, token_type_idx in enumerate([token_type_indices[token] for token in token_types]):
+                            grouped_data[token_type_idx, layer] += patch_data[component_idx, i, pos]
+                aggregated_data[patch_type] += grouped_data
+
+            print(f"Grouped data for {patch_type} after processing:\n{grouped_data}")
+            print(f"Aggregated data for {patch_type} after addition:\n{aggregated_data[patch_type]}")
+
+        query_count += 1
+        print(f"Queries processed so far: {query_count}")
+
+        # Normalize aggregated data
+        for key in aggregated_data:
+            print(f"Normalizing aggregated data for {key}. Current shape: {aggregated_data[key].shape}")
+            aggregated_data[key] /= query_count
+            print(f"Normalized aggregated data for {key}:\n{aggregated_data[key]}")
+
+        # Generate heatmaps for aggregated data
+        for patch_type, data in aggregated_data.items():
             for i, component in enumerate(["Residual Stream", "Attention Output", "MLP Output"]):
-                component_data = grouped_data.cpu().numpy()
                 plot_heatmap(
-                    component_data,
-                    title=f"{patch_type} - Importance of {component}",
+                    data.cpu().numpy(),
+                    title=f"Aggregated {patch_type} - Importance of {component}",
                     xlabel="Token Type",
                     ylabel="Layer",
                     xticklabels=unique_token_types,
-                    yticklabels=[f"Layer {l}" for l in range(component_data.shape[1])],
-                    save_path=f"heatmaps/query_{query_id}_{patch_type.lower().replace(' ', '_')}_{component.lower().replace(' ', '_')}.png",
+                    yticklabels=[f"L {l}" for l in range(data.shape[1])],
+                    save_path=f"heatmaps/{patch_type.lower().replace(' ', '_')}_{component.lower().replace(' ', '_')}.png",
                 )
 
-    print("Activation patching and heatmap generation completed.")
+        print("Averaged activation patching and heatmap generation completed.")
 
 
 def classify_tokens(tokenizer, query, baseline_doc, perturbed_doc):
     """
-    Classify each token in the document into one of the token types.
+    Classify each token in the perturbed document into token categories.
     """
     query_tokens = tokenizer.tokenize(query)
     query_ids = tokenizer.convert_tokens_to_ids(query_tokens)
@@ -313,14 +396,17 @@ def classify_tokens(tokenizer, query, baseline_doc, perturbed_doc):
             token_types.append("tokSEP")  # SEP token
         elif token_id in query_ids and token_id not in baseline_ids:
             token_types.append("tokinj")  # Injected query term
-        elif token_id in query_ids:
-            token_types.append("tokqterm+")  # Query term present in the baseline
+        elif token_id in query_ids and token_id in baseline_ids:
+            token_types.append("tokqterm+")  # Query term in both query and baseline
+        elif token_id in query_ids and token_id in baseline_ids and token_id not in perturbed_ids:
+            token_types.append("tokqterm-")  # Non-selected query term
         elif token_id not in query_ids:
             token_types.append("tokother")  # Non-query term
         else:
-            token_types.append("tokqterm-")  # Unselected query term
+            token_types.append("tokother")  # Fallback to non-query term
 
     return token_types
+
 
 def ranking_metric(patched_doc_embedding, og_score, p_score):
     """
