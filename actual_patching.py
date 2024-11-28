@@ -18,21 +18,17 @@ from patching_helpers import (
     get_act_patch_attn_head_by_pos,
 )
 
-def plot_heatmap(data, title, xlabel, ylabel, xticklabels=None, yticklabels=None, figsize=(8, 6), cmap="coolwarm_r", save_path=None):
+def plot_heatmap(data, title, xlabel, ylabel, cmap="coolwarm_r", save_path=None):
     """
     Utility function to plot paper-style heatmaps using seaborn.
     """
-    plt.figure(figsize=figsize)
-    sns.set_theme(style="whitegrid")  # Set theme for a cleaner look
-    sns.set(font_scale=1.2)
+    plt.figure(figsize=(10,6))
     sns.heatmap(
         data,
         annot=True,  # Annotate values in cells for debugging
         fmt=".2f",
         cmap=cmap,  # Diverging color map
         cbar=True,
-        xticklabels=xticklabels,
-        yticklabels=yticklabels,
         linewidths=0.5,
         linecolor="gray",
         vmin=-1,  # Normalize scores to range [-1, 1]
@@ -41,7 +37,6 @@ def plot_heatmap(data, title, xlabel, ylabel, xticklabels=None, yticklabels=None
     plt.title(title, fontsize=16)
     plt.xlabel(xlabel, fontsize=14)
     plt.ylabel(ylabel, fontsize=14)
-    plt.xticks(rotation=0)
     plt.tight_layout()
 
     if save_path:
@@ -119,6 +114,8 @@ def prepare_diagnostic_dataset(corpus, queries, qrels, device):
         num_docs = 0
         scored_docs = []
         score_changes = []
+        original_docs = []
+        perturbed_docs = [] 
         for doc in query_docs:
             original_doc = doc["text"]
             max_seq_length = 512
@@ -147,25 +144,27 @@ def prepare_diagnostic_dataset(corpus, queries, qrels, device):
 
         for doc, baseline_score in scored_docs:
             original_doc = doc["text"]
+            original_docs.append(original_doc)
 
             # Randomly select a query term for perturbation
             random_query_term = random.choice(query_text.split())
             perturbed_doc = original_doc + f" {random_query_term}"
+            perturbed_docs.append(perturbed_doc)
 
             # Tokenize perturbed document
             tokenized_p_doc = tokenizer(perturbed_doc, return_tensors="pt", max_length=max_seq_length, truncation=True)
 
             # Compute perturbed score
-            perturbed_outputs = tl_model(
+            perturbed_outputs, perturbed_cache = tl_model.run_with_cache(
                 tokenized_p_doc["input_ids"].to(device),
                 return_type="embeddings",
                 one_zero_attention_mask=tokenized_p_doc["attention_mask"].to(device),
             )
             perturbed_embedding = perturbed_outputs[:, 0, :].squeeze(0)
-            perturbed_score = torch.matmul(q_embedding, perturbed_embedding.t()).item()
+            perturbed_score = torch.matmul(q_embedding, perturbed_embedding.t())
 
             # Compute score change
-            score_change = perturbed_score - baseline_score
+            score_change = perturbed_score.item() - baseline_score
             total_score_change += score_change
             score_changes.append(score_change)
             num_docs += 1
@@ -180,6 +179,8 @@ def prepare_diagnostic_dataset(corpus, queries, qrels, device):
                 "query_id": query_id,
                 "query_text": query_text,
                 "avg_score_change": avg_normalized_score_change,
+                "original_docs": original_docs, 
+                "perturbed_docs": perturbed_docs,
             })
 
     # Select top 100 queries with the highest average score change
@@ -204,188 +205,155 @@ def perform_activation_patching(diagnostic_dataset, corpus, queries, qrels, devi
     n_layers = tl_model.cfg.n_layers
     n_heads = tl_model.cfg.n_heads
     n_token_types = 6  # Number of unique token types
+    layer_head_list = [(0,9), (1,6), (2,3), (3,8)] # heads to patch
 
     # Initialize aggregated data structures
     aggregated_data = {
-        "Block Every": torch.zeros((n_token_types, n_layers), device=device),
-        "Attn Head All Pos": torch.zeros((n_layers, n_heads), device=device),
-        "Attn Head By Pos": torch.zeros((n_token_types, n_layers), device=device),  # Adjust dynamically
+        "Block Every": torch.zeros((3, n_layers, max_seq_length), device=device),  # [component, layer, position]
+        "Attn Head All Pos": torch.zeros((n_layers, n_heads), device=device),  # [layer, head]
+        "Attn Head By Pos": torch.zeros((2, len(layer_head_list), max_seq_length), device=device),  # [component, layer-head index, position]
     }
 
     query_count = 0
-
     for data in diagnostic_dataset:
         query_id = data["query_id"]
         query_text = data["query_text"]
+        print(f"Processing query: {query_id} - {query_text}")
 
-        relevant_doc_ids = qrels.get(query_id, {})
-        query_docs = [corpus[doc_id] for doc_id in relevant_doc_ids.keys() if doc_id in corpus]
-
-        if not query_docs:
-            print(f"No relevant documents found for query {query_id}.")
-            continue
-
-        doc = query_docs[0]
-        original_doc = doc["text"]
-
-        random_query_term = random.choice(query_text.split())
-        injected_doc = original_doc + f" {random_query_term}"
-
-        tokenized_baseline_doc = tokenizer(original_doc, return_tensors="pt", max_length=max_seq_length, truncation=True)
-        tokenized_injected_doc = tokenizer(injected_doc, return_tensors="pt", max_length=max_seq_length, truncation=True)
-
-        # Ensure token lengths match
-        b_len = tokenized_baseline_doc["input_ids"].size(1)
-        p_len = tokenized_injected_doc["input_ids"].size(1)
-
-        if b_len != p_len:
-            size_diff = abs(b_len - p_len)
+        # Iterate through all provided documents for the query
+        for original_doc, perturbed_doc in zip(data["original_docs"], data["perturbed_docs"]):
+            # Tokenize query, baseline, and injected documents
+            tokenized_query = tokenizer(query_text, return_tensors="pt", max_length=max_seq_length, truncation=True)
+            tokenized_baseline_doc = tokenizer(original_doc, return_tensors="pt", max_length=max_seq_length, truncation=True, padding="max_length")
+            tokenized_injected_doc = tokenizer(perturbed_doc, return_tensors="pt", max_length=max_seq_length, truncation=True, padding="max_length")
+            
+            # Ensure token lengths match
             filler_token = tokenizer.encode("a", add_special_tokens=False)[0]
-            if b_len < p_len:
-                filler_tokens = torch.full((1, size_diff), filler_token, dtype=torch.long, device=device)
-                filler_attn_mask = torch.ones((1, size_diff), dtype=torch.long, device=device)
-                tokenized_baseline_doc["input_ids"] = torch.cat(
-                    [tokenized_baseline_doc["input_ids"].to(device), filler_tokens], dim=1
-                )
-                tokenized_baseline_doc["attention_mask"] = torch.cat(
-                    [tokenized_baseline_doc["attention_mask"].to(device), filler_attn_mask], dim=1
-                )
-            else:
-                filler_tokens = torch.full((1, size_diff), filler_token, dtype=torch.long, device=device)
-                filler_attn_mask = torch.ones((1, size_diff), dtype=torch.long, device=device)
-                tokenized_injected_doc["input_ids"] = torch.cat(
-                    [tokenized_injected_doc["input_ids"].to(device), filler_tokens], dim=1
-                )
-                tokenized_injected_doc["attention_mask"] = torch.cat(
-                    [tokenized_injected_doc["attention_mask"].to(device), filler_attn_mask], dim=1
-                )
+            b_len = tokenized_baseline_doc["input_ids"].size(1)
+            p_len = tokenized_injected_doc["input_ids"].size(1)
 
-        tokenized_query = tokenizer(query_text, return_tensors="pt", max_length=max_seq_length, truncation=True)
-        q_outputs = tl_model(
-            tokenized_query["input_ids"].to(device),
-            return_type="embeddings",
-            one_zero_attention_mask=tokenized_query["attention_mask"].to(device),
-        )
-        q_embedding = q_outputs[:, 0, :].squeeze(0)
+            if b_len != p_len:
+                adj_n = p_len - b_len
+                cls_tok = tokenized_baseline_doc["input_ids"][0][0]
+                sep_tok = tokenized_baseline_doc["input_ids"][0][-1]
+                filler_tokens = torch.full((adj_n,), filler_token)
+                filler_attn_mask = torch.full((adj_n,), tokenized_baseline_doc["attention_mask"][0][1]) 
+                adj_doc = torch.cat((tokenized_baseline_doc["input_ids"][0][1:-1], filler_tokens))
+                tokenized_baseline_doc["input_ids"] = torch.cat((cls_tok.view(1), adj_doc, sep_tok.view(1)), dim=0).view(1,-1)
+                tokenized_baseline_doc["attention_mask"] = torch.cat((tokenized_baseline_doc["attention_mask"][0], filler_attn_mask), dim=0).view(1,-1)
 
-        # Baseline run
-        baseline_outputs, baseline_cache = tl_model.run_with_cache(
-            tokenized_baseline_doc["input_ids"].to(device),
-            one_zero_attention_mask=tokenized_baseline_doc["attention_mask"].to(device),
-            return_type="embeddings",
-        )
-        baseline_score = torch.matmul(q_embedding, baseline_outputs[:, 0, :].t()).item()
+            # Extract query embedding
+            q_outputs = tl_model(
+                tokenized_query["input_ids"],
+                return_type="embeddings",
+                one_zero_attention_mask=tokenized_query["attention_mask"],
+            )
+            q_embedding = q_outputs[:, 0, :].squeeze(0)
 
-        # Perturbed run
-        perturbed_outputs, injected_cache = tl_model.run_with_cache(
-            tokenized_injected_doc["input_ids"].to(device),
-            one_zero_attention_mask=tokenized_injected_doc["attention_mask"].to(device),
-            return_type="embeddings",
-        )
-        perturbed_score = torch.matmul(q_embedding, perturbed_outputs[:, 0, :].t()).item()
+            # Baseline run
+            baseline_outputs = tl_model(
+                tokenized_baseline_doc["input_ids"],
+                return_type="embeddings",
+                one_zero_attention_mask=tokenized_baseline_doc["attention_mask"],
+            )
+            baseline_embedding = baseline_outputs[:,0,:].squeeze(0)
+            baseline_score = torch.matmul(q_embedding, baseline_outputs[:, 0, :].t()).item()
 
-        # Patching methods
-        act_patch_block_every = get_act_patch_block_every(
-            tl_model,
-            device,
-            tokenized_baseline_doc,
-            injected_cache,
-            lambda patched_doc_embedding: ranking_metric(
-                patched_doc_embedding,
-                baseline_score,
-                perturbed_score,
-                q_embedding
-            ),
-        )
+            # Perturbed run
+            perturbed_outputs, perturbed_cache = tl_model.run_with_cache(
+                tokenized_injected_doc["input_ids"],
+                one_zero_attention_mask=tokenized_injected_doc["attention_mask"],
+                return_type="embeddings",
+            )
+            perturbed_embedding = perturbed_outputs[:,0,:].squeeze(0)
+            perturbed_score = torch.matmul(q_embedding, perturbed_outputs[:, 0, :].t()).item()
 
-        act_patch_attn_head_out_all_pos = get_act_patch_attn_head_out_all_pos(
-            tl_model,
-            device,
-            tokenized_baseline_doc,
-            injected_cache,
-            lambda patched_doc_embedding: ranking_metric(
-                patched_doc_embedding,
-                baseline_score,
-                perturbed_score,
-                q_embedding
-            ),
-        )
+            def ranking_metric(patched_doc_embedding, og_score=baseline_score, p_score=perturbed_score):
+                patched_score = torch.matmul(q_embedding, patched_doc_embedding.t())
+                return (patched_score - og_score) / (p_score - og_score)
 
-        layer_head_list = [(layer, head) for layer in range(tl_model.cfg.n_layers) for head in range(tl_model.cfg.n_heads)]
+            # Activation patching - by block over all token positions (e.g., input to residual stream, activation block output, MLP output)
+            act_patch_block_every = get_act_patch_block_every(
+                tl_model,
+                device,
+                tokenized_baseline_doc,
+                perturbed_cache,
+                ranking_metric
+            )
 
-        act_patch_attn_head_by_pos = get_act_patch_attn_head_by_pos(
-            tl_model,
-            device,
-            tokenized_baseline_doc,
-            injected_cache,
-            lambda patched_doc_embedding: ranking_metric(
-                patched_doc_embedding,
-                baseline_score,
-                perturbed_score,
-                q_embedding
-            ),
-            layer_head_list,
-        )
+            # Activation patching - by attention head over all token positions
+            act_patch_attn_head_out_all_pos = get_act_patch_attn_head_out_all_pos(
+                tl_model,
+                device,
+                tokenized_baseline_doc,
+                perturbed_cache,
+                ranking_metric
+            )
 
-        # Classify tokens
-        token_types = classify_tokens(tokenizer, query_text, original_doc, injected_doc)
-        unique_token_types = ["tokCLS", "tokinj", "tokqterm+", "tokqterm-", "tokother", "tokSEP"]
-        token_type_indices = {t: i for i, t in enumerate(unique_token_types)}
+            # Activation patching - by attention head by individual token position
+            act_patch_attn_head_by_pos = get_act_patch_attn_head_by_pos(
+                tl_model,
+                device,
+                tokenized_baseline_doc,
+                perturbed_cache,
+                ranking_metric,
+                layer_head_list,
+            )
 
-        print(f"Token types: {token_types}")  # Print classified token types
-        print(f"Unique token types: {unique_token_types}")
+            print("Results from get_act_patch_block_every:\n", act_patch_block_every)
+            print("Results from get_act_patch_attn_head_out_all_pos:\n", act_patch_attn_head_out_all_pos)
+            print("Results from get_act_patch_attn_head_by_pos:\n", act_patch_attn_head_by_pos)
 
-        for patch_type, patch_data in [
-            ("Block Every", act_patch_block_every),
-            ("Attn Head All Pos", act_patch_attn_head_out_all_pos),
-            ("Attn Head By Pos", act_patch_attn_head_by_pos),
-        ]:
-            print(f"\nProcessing patch type: {patch_type}")
-            print(f"Patch data shape: {patch_data.shape}")
+            # Classify tokens
+            token_types = classify_tokens(tokenizer, query_text, original_doc, perturbed_doc)
+            unique_token_types = ["tokCLS", "tokinj", "tokqterm+", "tokqterm-", "tokother", "tokSEP"]
+            token_type_indices = {t: i for i, t in enumerate(unique_token_types)}
 
-            if patch_type == "Block Every":
-                grouped_data = torch.zeros((n_token_types, n_layers), device=device)
-                for component_idx in range(3):  # 3 components: resid_pre, attn_out, mlp_out
-                    for pos, token_type_idx in enumerate([token_type_indices[token] for token in token_types]):
-                        grouped_data[token_type_idx, :] += patch_data[component_idx, :, pos]
-                aggregated_data[patch_type] += grouped_data
+            print(f"Token types: {token_types}")  # Print classified token types
+            print(f"Unique token types: {unique_token_types}")
 
-            elif patch_type == "Attn Head All Pos":
-                grouped_data = patch_data.mean(dim=1)  # Average over heads
-                aggregated_data[patch_type] += grouped_data.unsqueeze(1)  # Reshape to (n_layers, 1)
+            # Aggregate results for heatmap generation
+            aggregated_data["Block Every"] += act_patch_block_every
+            aggregated_data["Attn Head All Pos"] += act_patch_attn_head_out_all_pos
+            aggregated_data["Attn Head By Pos"] += act_patch_attn_head_by_pos
 
-            elif patch_type == "Attn Head By Pos":
-                grouped_data = torch.zeros((n_token_types, n_layers), device=device)
-                for component_idx in range(2):  # 2 components: z and pattern
-                    for i, (layer, head) in enumerate(layer_head_list):
-                        for pos, token_type_idx in enumerate([token_type_indices[token] for token in token_types]):
-                            grouped_data[token_type_idx, layer] += patch_data[component_idx, i, pos]
-                aggregated_data[patch_type] += grouped_data
-
-            print(f"Grouped data for {patch_type} after processing:\n{grouped_data}")
-            print(f"Aggregated data for {patch_type} after addition:\n{aggregated_data[patch_type]}")
-
-        query_count += 1
-        print(f"Queries processed so far: {query_count}")
-
-        # Normalize aggregated data
-        for key in aggregated_data:
-            print(f"Normalizing aggregated data for {key}. Current shape: {aggregated_data[key].shape}")
-            aggregated_data[key] /= query_count
-            print(f"Normalized aggregated data for {key}:\n{aggregated_data[key]}")
+            query_count += 1
 
         # Generate heatmaps for aggregated data
         for patch_type, data in aggregated_data.items():
-            for i, component in enumerate(["Residual Stream", "Attention Output", "MLP Output"]):
+            data = torch.clamp(data, min=-1.0, max=1.0)
+            if patch_type == "Block Every":
+                # Heatmaps for components of Block Every
+                components = ["Residual Stream", "Attention Output", "MLP Output"]
+                for i, component in enumerate(components):
+                    plot_heatmap(
+                        act_patch_block_every[i].cpu().numpy(),
+                        title=f"Aggregated {patch_type} - Importance of {component}",
+                        xlabel="Position",
+                        ylabel="Layer",
+                        save_path=f"heatmaps/{patch_type.lower().replace(' ', '_')}_{component.lower().replace(' ', '_')}.png",
+                    )
+            elif patch_type == "Attn Head Out By Pos":
+                # Heatmaps for components of Attn Head Out By Pos
+                components_by_pos = ["attn_head_out", "pattern"]
+                for i, component in enumerate(components_by_pos):
+                    plot_heatmap(
+                        act_patch_attn_head_out_by_pos[i].cpu().numpy(),
+                        title=f"Importance of {component} by Position (Layer-Head x Position)",
+                        xlabel="Position",
+                        ylabel="Layer-Head",
+                        save_path=f"heatmaps/{patch_type.lower().replace(' ', '_')}_{component.lower().replace(' ', '_')}.png",
+                    )
+            else:
+                # Heatmap for Attn Head All Pos
                 plot_heatmap(
-                    data.cpu().numpy(),
-                    title=f"Aggregated {patch_type} - Importance of {component}",
-                    xlabel="Token Type",
+                    act_patch_attn_head_out_all_pos.cpu().numpy(),
+                    title=f"Aggregated {patch_type} - Importance of All",
+                    xlabel="Head",
                     ylabel="Layer",
-                    xticklabels=unique_token_types,
-                    yticklabels=[f"L {l}" for l in range(data.shape[1])],
-                    save_path=f"heatmaps/{patch_type.lower().replace(' ', '_')}_{component.lower().replace(' ', '_')}.png",
+                    save_path=f"heatmaps/{patch_type.lower().replace(' ', '_')}_all.png",
                 )
+
 
         print("Averaged activation patching and heatmap generation completed.")
 
@@ -421,16 +389,6 @@ def classify_tokens(tokenizer, query, baseline_doc, perturbed_doc):
             token_types.append("tokother")  # Fallback to non-query term
 
     return token_types
-
-
-def ranking_metric(patched_doc_embedding, og_score, p_score, q_embedding):
-    """
-    Computes the ranking metric normalized between -1 and 1.
-    """
-    patched_score = torch.matmul(q_embedding, patched_doc_embedding.t())
-    if p_score - og_score == 0:
-        return 0  # Avoid division by zero
-    return (patched_score - og_score) / (p_score - og_score)
 
 def main():
     """
