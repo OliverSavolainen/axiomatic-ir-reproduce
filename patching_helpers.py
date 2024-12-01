@@ -1,7 +1,7 @@
 import torch
 from tqdm import tqdm
 
-from transformer_lens import HookedEncoder, ActivationCache
+from TransformerLens.transformer_lens import HookedEncoder, ActivationCache
 from transformer_lens import patching
 import TransformerLens.transformer_lens.utils as utils
 
@@ -33,6 +33,9 @@ called on the model's logit output.
 def get_act_patch_block_every(
     model: HookedEncoder, 
     device,
+    q_embedding,
+    og_score,
+    p_score,
     corrupted_tokens: Float[torch.Tensor, "batch pos"], 
     clean_cache: ActivationCache, 
     patching_metric: Callable[[Float[torch.Tensor, "batch pos d_vocab"]], float]
@@ -58,7 +61,7 @@ def get_act_patch_block_every(
                     fwd_hooks = [(utils.get_act_name(component, layer), hook_fn)],
                 )
                 patched_embedding = patched_outputs[:,0,:].squeeze(0)
-                results[component_idx, layer, position] = patching_metric(patched_embedding)
+                results[component_idx, layer, position] = patching_metric(patched_embedding,q_embedding,og_score,p_score)
 
     return results
 
