@@ -323,6 +323,7 @@ def load_all_results(result_type, results_path, fname_list=None):
         doc_ids.append(document_id)
         label_file_pattern = "{}_{}_labels.txt".format(query_id, document_id)
         label_files = glob.glob(os.path.join(results_path, label_file_pattern))
+        print(label_files)
 
         if label_files:
             label_file = label_files[0]
@@ -351,7 +352,10 @@ def load_queries(query_path, selected_term_path):
 Returns the full query and selected term.
 '''
 def get_query_data(query_id, query_dict, terms_dict):
-    return query_dict[query_id], terms_dict[query_id]
+    if query_id in query_dict:
+        return query_dict[query_id], terms_dict[query_id]
+    else:
+        return None, None
 
 
 
@@ -369,6 +373,8 @@ def segment_tokens_all(data, labels, qids, perturb_type, full_q_dict, selected_t
 
         if qid not in qid_lookup:
             full_q, selected_term = get_query_data(qid, full_q_dict, selected_terms_dict)
+            if full_q is None:
+                continue
             qid_lookup[qid] = {
                 "full_query_toks": [tokenizer.tokenize(term) for term in full_q.split()],
                 "selected_term_toks": tokenizer.tokenize(selected_term),
@@ -495,6 +501,10 @@ def plot_heads(data, save_path):
     
 
 def grouped_bar_chart(data_array, heads, label_segs, save_path=None):
+    import pandas as pd
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
     # Create a DataFrame
     df = pd.DataFrame(data_array.T, columns=[f'L{head[0]}H{head[1]}' for head in heads])
     df['Dimension'] = label_segs
@@ -502,12 +512,39 @@ def grouped_bar_chart(data_array, heads, label_segs, save_path=None):
 
     # Create the grouped bar chart with seaborn
     sns.set(style="whitegrid")
+    fig, ax = plt.subplots(figsize=(8, 6))  # Adjust figure size if needed
     ax = sns.barplot(x='Dimension', y='Values', hue='Head', data=df_melted, palette="Set3")
 
     # Add labels and title
-    ax.set(xlabel='Token Type', ylabel='Avg Attention Scores', title='Top Ranked Perturbed Documents')
-    ax.set_xticklabels(ax.get_xticklabels(), rotation=45, fontsize=8, ha="right")
+    ax.set(
+        xlabel='Token Type', 
+        ylabel='Avg Attention Scores', 
+        title='Top Ranked Perturbed Documents'
+    )
 
+    # Rotate x-axis labels and align
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=0, fontsize=8, ha="right")
+
+    # Add small signs (text) under each label
+    # These annotations mimic the small symbols you see below the x-axis labels
+    tick_positions = ax.get_xticks()
+    tick_labels = ax.get_xticklabels()
+    annotations = [
+        "(inj → q_term+)", "(q_term+ → inj)", 
+        "(inj → q_term-)", "(inj → sep)", 
+        "(other → sep)"
+    ]
+
+    # Loop to place the annotations just under each x-tick
+    for pos, annotation in zip(tick_positions, annotations):
+        ax.text(pos, -0.02, annotation, 
+                transform=ax.get_xaxis_transform(), 
+                ha='center', fontsize=6, color='gray')
+
+    # Adjust layout to fit annotations
+    plt.tight_layout()
+
+    # Save the figure if save_path is provided
     if save_path:
         plt.savefig(save_path, bbox_inches='tight', dpi=1200)
         plt.close()
@@ -516,10 +553,11 @@ def grouped_bar_chart(data_array, heads, label_segs, save_path=None):
     return plt.gcf()
 
 
-def main():
 
-    perturb_type = "append"
-    plot = ["block"]
+def main(plot, perturb_type):
+
+    perturb_type = perturb_type
+    plot = [plot]
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     # Load tokenizer
@@ -544,6 +582,12 @@ def main():
         # Load, segment, and plot average block results
         print("plotting all block results")
         all_block_results,  all_block_labels, all_block_qids, _ = load_all_results("block", os.path.join("results", perturb_type))
+        non_zero_matrices = [matrix for matrix in all_block_results if np.any(matrix != 0)]
+
+        # Print results
+        print("Non-zero matrices:")
+        for matrix in non_zero_matrices:
+            print(matrix)
         all_block_segmented = segment_tokens_all(all_block_results, all_block_labels, all_block_qids, perturb_type, full_query_dict, selected_terms_dict, tokenizer)
         _ = plot_blocks_plotly(all_block_segmented, labels, "result_figures/{}_all_block_seg.png".format(perturb_type))
 

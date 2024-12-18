@@ -3,6 +3,7 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 import json
+import random
 
 from transformers import AutoTokenizer, AutoModel
 from datasets import Value, Dataset
@@ -24,6 +25,7 @@ def load_tokenizer_and_models(hf_model_name, device):
     hf_model.to(device)
 
     tl_model = HookedEncoder.from_pretrained(hf_model_name, device=device, hf_model=hf_model)
+    tl_model.to(device)
 
     return tokenizer, tl_model
 
@@ -53,8 +55,8 @@ def preprocess_corpus(corpus_dict, tokenizer):
     corpus_df = pd.DataFrame.from_dict(corpus_dict, orient="index")
     corpus_df.index.name = "_id"
     dataset = Dataset.from_pandas(corpus_df)
-    tokenzied_dataset = preprocess(dataset, tokenizer, remove_cols=["text"])
-    dataloader = DataLoader(tokenzied_dataset, batch_size=1)
+    tokenized_dataset = preprocess(dataset, tokenizer, remove_cols=["text"])
+    dataloader = DataLoader(tokenized_dataset, batch_size=1)
 
     return dataloader
 
@@ -113,9 +115,24 @@ def encode_tl(model, dataloader):
 
 # Compute ranking scores using dot product
 def compute_ranking_scores(query_embedding, doc_embeddings, doc_ids):
-    scores = np.matmul(query_embedding, doc_embeddings.T)
+    scores = torch.matmul(query_embedding, doc_embeddings.T)
     
     # sort scores and labels
-    sorted_idx = np.argsort(scores)[::-1]
+    # sorted_idx = torch.argsort(scores)[::-1]
 
-    return scores[sorted_idx], doc_ids[sorted_idx].astype(int)
+    # Sort scores and corresponding doc_ids in descending order
+    sorted_idx = torch.argsort(scores, descending=True)
+    sorted_scores = scores[sorted_idx]
+
+    # Convert indices to list of IDs (doc_ids are strings)
+    sorted_doc_ids = [doc_ids[i] for i in sorted_idx.cpu().numpy()]
+
+    # return scores[sorted_idx], doc_ids[sorted_idx].astype(int)
+    return sorted_scores, sorted_doc_ids
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
