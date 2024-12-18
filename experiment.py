@@ -5,22 +5,15 @@ import pandas as pd
 import os
 from tqdm import tqdm
 import random
-import glob
 import argparse
 
-from functools import partial
 import TransformerLens.transformer_lens.utils as utils
-from TransformerLens.transformer_lens import patching
-from jaxtyping import Float
 
 from helpers import (
     load_json_file,
     load_tokenizer_and_models,
     preprocess_queries,
-    preprocess_corpus,
-    encode_hf,
-    encode_tl,
-    compute_ranking_scores
+    preprocess_corpus
 )
 
 from patching_helpers import (
@@ -45,6 +38,7 @@ def run_experiment(experiment_type, perturb_type):
             - prepend : additional term is injected at the beginning of the document
             - append : additional term is injected at the end of the document
     """
+    
     torch.set_grad_enabled(False)
     device = utils.get_device()
 
@@ -73,10 +67,22 @@ def run_experiment(experiment_type, perturb_type):
     # Preprocess queries
     queries_dataloader = preprocess_queries(tfc1_add_queries, tokenizer)
 
+    # Setup directories to save results
+    if not os.path.exists("results"):
+        os.mkdir("results")
+    if not os.path.exists(os.path.join("results", perturb_type)):
+        os.mkdir(f"results/{perturb_type}")
+    if not os.path.exists("results_head_decomp_mmarco"):
+        os.mkdir("results_head_decomp_mmarco")
+    if not os.path.exists(os.path.join("results_head_decomp_mmarco", perturb_type)):
+        os.mkdir(f"results_head_decomp_mmarco/{perturb_type}")
+    if not os.path.exists("results_attn_pattern_mmarco"):
+        os.mkdir("results_attn_pattern_mmarco")
+    if not os.path.exists(os.path.join("results_attn_pattern_mmarco", perturb_type)):
+        os.mkdir(f"results_attn_pattern_mmarco/{perturb_type}")
+
     # Loop through each query and run activation patching
     for i, qid in enumerate(tqdm(target_qids)):
-        if i < 93:
-            continue
         print("QID at:", i)
         # Get query embedding
         q_tokenized = list(filter(lambda item: item["_id"] == qid, queries_dataloader))[0]
@@ -170,20 +176,6 @@ def run_experiment(experiment_type, perturb_type):
                 same as on clean input, and 1 when performance is same as on corrupted input.
                 '''
 
-
-                # Setup directories to save results
-                if not os.path.exists("results"):
-                    os.mkdir("results")
-                if not os.path.exists(os.path.join("results", perturb_type)):
-                    os.mkdir(f"results/{perturb_type}")
-                if not os.path.exists("results_head_decomp_mmarco"):
-                    os.mkdir("results_head_decomp_mmarco")
-                if not os.path.exists(os.path.join("results_head_decomp_mmarco", perturb_type)):
-                    os.mkdir(f"results_head_decomp_mmarco/{perturb_type}")
-                if not os.path.exists("results_attn_pattern_mmarco"):
-                    os.mkdir("results_attn_pattern_mmarco")
-                if not os.path.exists(os.path.join("results_attn_pattern_mmarco", perturb_type)):
-                    os.mkdir(f"results_attn_pattern_mmarco/{perturb_type}")
                 
                 # Patch after each layer (residual stream, attention, MLPs)
                 if experiment_type == "block":

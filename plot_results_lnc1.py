@@ -442,24 +442,23 @@ def grouped_bar_chart(data_array, heads, label_segs, save_path=None):
     return plt.gcf()
 
 def segment_tokens_all(data, labels, qids, perturb_type, full_q_dict, selected_terms_dict, tokenizer):
+    # This needed rewriting to be according to the LNC1 axiom
     segmented_data = []
     qid_lookup = {}  # for faster lookup
 
     for i, result in enumerate(data):
         label = labels[i]
         qid = qids[i]
-        print(result.shape)
         if qid not in qid_lookup:
             full_q, selected_term = get_query_data(qid, full_q_dict, selected_terms_dict)
+            # Not using all 100 queries for this
             if full_q == None:
                 continue
             qid_lookup[qid] = {
                 "full_query_toks": [tokenizer.tokenize(term) for term in full_q.split()],
             }
-        print(label)
-        print(full_q)
+
         full_q_tok_list = qid_lookup[qid]["full_query_toks"]
-        print(full_q_tok_list)
 
         if perturb_type == "prepend":
             # Prepend-specific logic
@@ -484,7 +483,6 @@ def segment_tokens_all(data, labels, qids, perturb_type, full_q_dict, selected_t
                         non_inj_tok_idxs = non_inj_tok_idxs + [*window_range]
 
                 q_term_non_inj_idxs = q_term_non_inj_idxs + non_inj_tok_idxs
-            print(q_term_non_inj_idxs)
         elif perturb_type == "append":
             # Append-specific logic
             og_doc_start_idx = 1
@@ -516,7 +514,6 @@ def segment_tokens_all(data, labels, qids, perturb_type, full_q_dict, selected_t
 
         all_doc_idxs = list(range(og_doc_start_idx, filler_start_idx)) if perturb_type=="append" else list(range(og_doc_start_idx, len(label)-2))
         non_q_term_idxs = list(set(all_doc_idxs) - set(q_term_non_inj_idxs))
-        print(non_q_term_idxs)
 
         if not non_q_term_idxs:
             non_q_term_toks = np.zeros((result.shape[0], result.shape[1], 1))
@@ -525,15 +522,6 @@ def segment_tokens_all(data, labels, qids, perturb_type, full_q_dict, selected_t
 
         # Get [SEP] token
         sep_tok = result[:, :, -1][:, :, np.newaxis]  # shape: (n_components, n_layers, 1)
-
-        print("Debugging Token Segmentation:")
-        print("len", len(label))
-        print("Query: ", full_q)
-        print("[CLS] Token:", label[0])
-        print("Filler Tokens:", label[filler_start_idx:og_doc_start_idx] if perturb_type == "prepend" else label[filler_start_idx:-1])
-        print("Query Tokens Not Matching Injected:", [label[idx] for idx in q_term_non_inj_idxs])
-        print("Non Query Tokens:", [label[idx] for idx in non_q_term_idxs])
-        print("[SEP] Token:", label[-1])
 
         # Concat along last axis
         new_result = np.concatenate([cls_tok, filler_toks, q_term_non_inj_toks, non_q_term_toks, sep_tok], axis=2)

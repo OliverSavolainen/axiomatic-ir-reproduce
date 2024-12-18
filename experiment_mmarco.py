@@ -5,22 +5,16 @@ import pandas as pd
 import os
 from tqdm import tqdm
 import random
-import glob
 import argparse
 
-from functools import partial
 import TransformerLens.transformer_lens.utils as utils
-from TransformerLens.transformer_lens import patching
-from jaxtyping import Float
 
 from helpers import (
     load_json_file,
     load_tokenizer_and_models,
     preprocess_queries,
     preprocess_corpus,
-    encode_hf,
-    encode_tl,
-    compute_ranking_scores
+    set_seed
 )
 
 from patching_helpers import (
@@ -32,13 +26,6 @@ from patching_helpers import (
 def ranking_metric(patched_doc_embedding, query_embedding,og_score=0, p_score=1):
     patched_score = torch.matmul(query_embedding, patched_doc_embedding.t())
     return (patched_score - og_score) / (p_score - og_score)
-
-def set_seed(seed=42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 def run_experiment(experiment_type, perturb_type):
     """
@@ -96,8 +83,6 @@ def run_experiment(experiment_type, perturb_type):
     # Loop through each query and run activation patching
     for i, qid in enumerate(tqdm(target_qids)):
         print("QID at:", i)
-        if i < 74:
-            continue
         # Get query embedding
         q_tokenized = list(filter(lambda item: item["_id"] == qid, queries_dataloader))[0]
         query_text = tokenizer.decode(q_tokenized["input_ids"][0], skip_special_tokens=True)
@@ -133,8 +118,6 @@ def run_experiment(experiment_type, perturb_type):
                 batch["attention_mask"] = batch["attention_mask"].to(device)
                 # Run perturbed prompt with cache to store activations
 
-                batch_text = tokenizer.decode(batch["input_ids"][0], skip_special_tokens=True)
-
                 perturbed_embeddings, perturbed_cache = tl_model.run_with_cache(
                     batch["input_ids"],
                     one_zero_attention_mask=batch["attention_mask"],
@@ -153,12 +136,13 @@ def run_experiment(experiment_type, perturb_type):
 
                 # Hacky thing b/c of the way the diagnostic dataset was created (it was originally created just for prepend)
                 # So will always need to adjust the tokens for append
+                # Add the randomly sampled query term
                 if perturb_type == "append":
                     filler_tokens = torch.full((adj_n+1,), filler_token_id) # skip CLS token
                     filler_attn_mask = torch.full((adj_n+1,), baseline_tokens["attention_mask"][0][1]) 
-                    adj_doc = torch.cat((baseline_tokens["input_ids"][0][2:-1], filler_tokens))#1
+                    adj_doc = torch.cat((baseline_tokens["input_ids"][0][1:-1], filler_tokens))#1
                     baseline_tokens["input_ids"] = torch.cat((cls_tok.view(1), adj_doc, sep_tok.view(1)), dim=0).view(1,-1)
-                    baseline_tokens["attention_mask"] = torch.cat((baseline_tokens["attention_mask"][0][1:], filler_attn_mask), dim=0).view(1,-1)
+                    baseline_tokens["attention_mask"] = torch.cat((baseline_tokens["attention_mask"][0], filler_attn_mask), dim=0).view(1,-1)
                 elif perturb_type == "prepend":
                     # But for prepend, we only need to adjust if the lengths are different
                     if p_len != b_len:
@@ -190,9 +174,6 @@ def run_experiment(experiment_type, perturb_type):
                 Linear function of score diff, calibrated so that it equals 0 when performance is 
                 same as on clean input, and 1 when performance is same as on corrupted input.
                 '''
-
-
-                # Setup directories to save results
 
                 
                 # Patch after each layer (residual stream, attention, MLPs)

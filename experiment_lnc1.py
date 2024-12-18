@@ -5,13 +5,9 @@ import pandas as pd
 import os
 from tqdm import tqdm
 import random
-import glob
 import argparse
 
-from functools import partial
 import TransformerLens.transformer_lens.utils as utils
-from TransformerLens.transformer_lens import patching
-from jaxtyping import Float
 
 from helpers import (
     load_json_file,

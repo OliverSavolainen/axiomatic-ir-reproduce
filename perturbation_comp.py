@@ -46,8 +46,6 @@ def compute_all_scores(perturb_type):
     filler_token_id = tokenizer.convert_tokens_to_ids("guantanamo")
     a_token_id = tokenizer.convert_tokens_to_ids("a")
     pad_token_id = tokenizer.pad_token_id
-
-    query_relative_changes = {}
     
     all_scores = []
     for qid in tqdm(target_qids):
@@ -70,14 +68,12 @@ def compute_all_scores(perturb_type):
 
         corpus_dataloader = preprocess_corpus(target_docs, tokenizer)
 
-        doc_relative_changes = []
-
         for batch in corpus_dataloader:
             try:
                 doc_id = batch["_id"][0]
                 baseline_doc = tfc1_add_baseline_corpus[str(qid)][doc_id]["text"]
                 baseline_tokens = tokenizer(baseline_doc, truncation=True, return_tensors="pt")
-
+                # Get score after injecting query term
                 perturbed_embeddings = tl_model(
                     batch["input_ids"],
                     one_zero_attention_mask=batch["attention_mask"],
@@ -88,7 +84,7 @@ def compute_all_scores(perturb_type):
                 orig_perturbed_score = torch.matmul(q_embedding, perturbed_embedding.t()).item()
 
 
-                # Compute baseline embedding (no fillers)
+                # Compute baseline score (no fillers)
                 baseline_embeddings = tl_model(
                     baseline_tokens["input_ids"].to(device),
                     one_zero_attention_mask=baseline_tokens["attention_mask"].to(device),
@@ -97,7 +93,7 @@ def compute_all_scores(perturb_type):
                 baseline_embedding = baseline_embeddings[:,0,:].squeeze(0)
                 baseline_score = torch.matmul(q_embedding, baseline_embedding.t()).item()
 
-                # Now add filler tokens as per perturb_type
+                # Now add padding tokens as per perturb_type
                 b_len = torch.sum(baseline_tokens["attention_mask"])
                 cls_tok = baseline_tokens["input_ids"][0][0]
                 sep_tok = baseline_tokens["input_ids"][0][-1]
@@ -143,7 +139,7 @@ def compute_all_scores(perturb_type):
                 )
                 perturbed_embedding = perturbed_embeddings[:,0,:].squeeze(0)
                 perturbed_score = torch.matmul(q_embedding, perturbed_embedding.t()).item()
-
+                # Replace PAD with 'a'
                 perturbed_ids = baseline_tokens["input_ids"].masked_fill(baseline_tokens["input_ids"] == pad_token_id, a_token_id)
                 perturbed_tokens = {
                     "input_ids": perturbed_ids,
@@ -158,10 +154,6 @@ def compute_all_scores(perturb_type):
                 perturbed_embedding = perturbed_embeddings[:,0,:].squeeze(0)
                 perturbed_score_a = torch.matmul(q_embedding, perturbed_embedding.t()).item()
                 all_scores.append((baseline_score,baseline_with_pad_score,orig_perturbed_score,perturbed_score,perturbed_score_a))
-                if baseline_score > 105:
-                    print()
-
-
 
             except Exception as e:
                 print("ERROR: {} for query {} and document {}".format(e, qid, doc_id))

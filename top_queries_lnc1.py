@@ -172,6 +172,7 @@ if __name__ == "__main__":
         for q, ch in sorted_queries:
             query_text = qid_to_text[q] if q in qid_to_text else "unknown query"
             f.write(f"{q},{ch},{query_text}\n")
+    # Find worst performing queries as adding length should lead to decrease in relevancy
     bottom_33 = sorted_queries[-33:]
     bottom_33_file = "data/lnc1_add_qids_with_text.csv"
     with open(bottom_33_file, "w") as f:
