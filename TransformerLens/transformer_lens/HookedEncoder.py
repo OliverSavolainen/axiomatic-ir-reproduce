@@ -16,10 +16,10 @@ from transformers import AutoTokenizer
 from typing_extensions import Literal
 
 import TransformerLens.transformer_lens.loading_from_pretrained as loading
-from transformer_lens import ActivationCache, FactoredMatrix, HookedTransformerConfig
-from transformer_lens.components import BertBlock, BertEmbed, BertMLMHead, Unembed
-from transformer_lens.hook_points import HookedRootModule, HookPoint
-from transformer_lens.utilities import devices
+from TransformerLens.transformer_lens import ActivationCache, FactoredMatrix, HookedTransformerConfig
+from TransformerLens.transformer_lens.components import BertBlock, BertEmbed, BertMLMHead, Unembed
+from TransformerLens.transformer_lens.hook_points import HookedRootModule, HookPoint
+from TransformerLens.transformer_lens.utilities import devices
 
 
 class HookedEncoder(HookedRootModule):

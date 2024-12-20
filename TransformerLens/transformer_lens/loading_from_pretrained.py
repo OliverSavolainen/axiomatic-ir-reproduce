@@ -13,7 +13,7 @@ from huggingface_hub import HfApi
 from transformers import AutoConfig, AutoModelForCausalLM, BertForPreTraining, AutoModel # or DistilBertModel?
 
 import TransformerLens.transformer_lens.utils as utils
-from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
+from TransformerLens.transformer_lens.HookedTransformerConfig import HookedTransformerConfig
 
 OFFICIAL_MODEL_NAMES = [
     "gpt2",
